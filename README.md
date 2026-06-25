@@ -96,9 +96,9 @@ docker compose exec ocr-service python3 -c "import paddle; paddle.utils.run_chec
 curl -F file=@sample.pdf http://localhost:8001/ingest -o out.tar && tar tf out.tar | head
 ```
 
-> **GPU 利用范围（如实说明）**：文字识别 / 表格 / 印章（PaddleOCR、PaddleX pipeline）会自动用 GPU；
-> **版面检测 `ocr/probe_layout.py` 目前写死 `device="cpu"`**。要让版面也走 GPU，把该文件里
-> `create_model(..., device="cpu")` 改成 `device="gpu"` 重新 `--build` 即可（本仓库自持源码，可放心改）。
+> **GPU 利用范围**：文字识别 / 表格 / 印章（PaddleOCR、PaddleX pipeline）自动用 GPU；
+> 版面检测（`ocr/probe_layout.py`）**默认也用 GPU**（`device` 取环境变量 `OCR_DEVICE`，默认 `gpu`）。
+> 纯 CPU 环境兜底：在 `docker-compose.yml` 给 ocr-service 加 `OCR_DEVICE=cpu`（注意此时还要换 CPU 版 paddle，见 Dockerfile 注释）。
 
 ---
 

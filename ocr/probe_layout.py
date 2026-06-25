@@ -19,6 +19,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 CONTRACTS = Path(os.environ.get("CR_CONTRACTS_ROOT", ROOT / "contracts"))
 MODEL_DIR = ROOT / "models" / "pp_doclayout_v2"
+# 版面检测设备：默认 gpu（独立 OCR 仓部署在 GPU 服务器）；纯 CPU 环境置 OCR_DEVICE=cpu 兜底。
+LAYOUT_DEVICE = os.environ.get("OCR_DEVICE", "gpu")
 DATA_RAW = CONTRACTS / "raw"
 DATA_DERIVED = CONTRACTS / "derived"
 RENDER_DPI = 200
@@ -113,7 +115,7 @@ def detect_layout(pages: list[dict], score_threshold: float) -> list[dict]:
     """对每页跑 PP-DocLayoutV2，返回归一化后的区域（按阅读顺序：上→下、左→右）。"""
     from paddlex import create_model  # 延迟导入
 
-    model = create_model(model_name="PP-DocLayoutV2", model_dir=str(MODEL_DIR), device="cpu")
+    model = create_model(model_name="PP-DocLayoutV2", model_dir=str(MODEL_DIR), device=LAYOUT_DEVICE)
     out_pages: list[dict] = []
     for pg in pages:
         results = model.predict(str(pg["path"]), batch_size=1)
