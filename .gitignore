@@ -1,0 +1,20 @@
+# 模型权重不入库（体积大、可重生/可单独传）
+models/
+*.gguf
+*.bin
+*.onnx
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# 本地配置
+.env
+.env.*
+
+# 杂项
+.DS_Store
+*.log
+*:Zone.Identifier

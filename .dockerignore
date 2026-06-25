@@ -1,0 +1,12 @@
+# 构建镜像时不入 context（卷挂载或可重生）
+models
+**/__pycache__
+**/*.pyc
+.git
+.gitignore
+.env
+.env.*
+*.log
+*:Zone.Identifier
+**/*:Zone.Identifier
+README.md

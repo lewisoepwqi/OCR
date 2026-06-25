@@ -1,0 +1,36 @@
+# 独立 OCR 服务（GPU）—— 自成一个仓库，与「合同雷达」前后端零耦合。
+# 起：  docker compose up -d --build
+# 看：  docker compose ps / logs -f ocr-service
+# 停：  docker compose down
+#
+# 暴露 :8001；合同前后端那侧把 OCR_SERVICE_URL 指到 http://<本机IP或域名>:8001。
+# 构建 context = 本仓库（.），只含 OCR 自带源码，构建期不碰任何合同代码。
+# OCR 不挂业务数据：私有 scratch 干活，结果经 HTTP tar 交回调用方（架构边界，勿改）。
+services:
+  ocr-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: cr-ocr-gpu
+    restart: unless-stopped
+    volumes:
+      - ./models:/app/models:ro            # PP-DocLayoutV2（只读）——见 README「准备模型」
+      - paddlex-cache:/root/.paddlex        # 首跑下载 PP-OCRv6/印章/表格模型，持久化复用
+    environment:
+      - OCR_HOST=0.0.0.0
+      - OCR_PORT=8001
+    ports:
+      - "8001:8001"
+    # GPU 透传：需宿主 nvidia-container-toolkit。
+    # 钉到物理 GPU 1：GPU 0 被宿主 llama-server(Qwen) 占用，OCR 用空闲的 1 号卡，互不抢显存。
+    # 容器内 paddle 只见这一张卡（编号 cuda:0）。要用全部卡改成 count: all。
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ['1']
+              capabilities: [gpu]
+
+volumes:
+  paddlex-cache:

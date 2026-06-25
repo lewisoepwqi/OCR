@@ -1,0 +1,14 @@
+# OCR 服务镜像依赖（GPU 版）。
+# 不含 paddlepaddle —— GPU 版由 Dockerfile 单独装 paddlepaddle-gpu（同名互斥，别在这里再列）。
+# 纯 CPU 部署：在此加回 paddlepaddle==3.2.2，并删 Dockerfile 里装 paddlepaddle-gpu 那行。
+paddlex[ocr]==3.7.1
+paddleocr==3.7.0
+opencv-contrib-python==4.10.0.84
+pypdfium2==5.10.1
+Pillow==12.2.0
+jieba==0.42.1
+PyYAML
+httpx==0.28.1
+fastapi==0.138.0
+uvicorn==0.49.0
+python-multipart==0.0.32
