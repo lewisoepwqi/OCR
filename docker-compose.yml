@@ -12,6 +12,7 @@ services:
       context: .
       dockerfile: Dockerfile
     image: cr-ocr-gpu
+    container_name: PaddleOCR
     restart: unless-stopped
     volumes:
       - ./models:/app/models:ro            # PP-DocLayoutV2（只读）——见 README「准备模型」
