@@ -7,17 +7,18 @@ from __future__ import annotations
 
 import shutil
 import tempfile
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import Response
+from fastapi.responses import JSONResponse, Response
 
 from common import bundle
+from . import health as health_mod
 from . import ingest as ingest_mod
 
 
-def create_app(*, ingest_fn=None, reocr_fn=None) -> FastAPI:
-    app = FastAPI(title="合同雷达 OCR 服务", version="0.1")
+def create_app(*, ingest_fn=None, reocr_fn=None, selftest_fn=None, warmup=True) -> FastAPI:
     _ingest = ingest_fn or ingest_mod.ingest
 
     def _reocr_default(cid: str, derived_root) -> dict:
@@ -25,10 +26,29 @@ def create_app(*, ingest_fn=None, reocr_fn=None) -> FastAPI:
         return build_document(cid, derived_root=derived_root)
 
     _reocr = reocr_fn or _reocr_default
+    _selftest = selftest_fn or health_mod.default_selftest
+    readiness = health_mod.Readiness()
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        # 启动即后台跑一次就绪自检（不阻塞监听；自检期间 /ready 返 503，跑完转就绪）
+        if warmup:
+            readiness.start(_selftest)
+        yield
+
+    app = FastAPI(title="合同雷达 OCR 服务", version="0.1", lifespan=lifespan)
+    app.state.readiness = readiness
 
     @app.get("/health")
     def health() -> dict:
+        # 存活探针：进程活即 200（与模型/GPU 是否就绪无关）。
         return {"ok": True}
+
+    @app.get("/ready")
+    def ready():
+        # 就绪探针：读启动自检缓存——模型加载 + GPU + 推理端到端通过才 200，否则 503（如实回报，不冒充就绪）。
+        st = readiness.get()
+        return JSONResponse(st, status_code=200 if st["ready"] else 503)
 
     @app.post("/ingest")
     def ingest_ep(file: UploadFile = File(...), contract_id: str | None = Form(None)) -> Response:
