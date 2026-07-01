@@ -154,6 +154,18 @@ def recognize(contract_id: str, debug: bool = False) -> list[dict]:
     return tables
 
 
+def write_manifest(derived: Path, tables: list[dict]) -> None:
+    """无条件写轻量表格清单 tables.json（续跑标记）：空表则 {"tables": []}。
+
+    放 derived 根级、只留索引字段——明细仍在 tables/<id>.json；避免被抽取层
+    tdir.glob("*.json") 污染语料（详见迭代2设计 §10.1）。
+    """
+    index = [{"table_id": t["table_id"], "page": t["page"],
+              "status": t["status"], "complexity": t["complexity"]} for t in tables]
+    (derived / "tables.json").write_text(
+        json.dumps({"tables": index}, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--id")
@@ -169,6 +181,7 @@ def main() -> None:
 
     print(f"表格识别（table_recognition_v2）：{contract_id}")
     tables = recognize(contract_id, args.debug)
+    write_manifest(DERIVED / contract_id, tables)   # 无条件落清单，作续跑标记
     simple = sum(1 for t in tables if t["complexity"] == "simple")
     print(f"\n表格数={len(tables)}：简单 {simple}（转 Markdown）/ 复杂 {len(tables)-simple}（needs_review）")
     print(f"产出在 {DERIVED/contract_id/'tables'}/")

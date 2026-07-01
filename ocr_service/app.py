@@ -5,8 +5,10 @@
 """
 from __future__ import annotations
 
+import os
 import shutil
 import tempfile
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -16,6 +18,30 @@ from fastapi.responses import JSONResponse, Response
 from common import bundle
 from . import health as health_mod
 from . import ingest as ingest_mod
+from .parser import read_progress
+
+
+def scratch_root() -> Path:
+    """OCR 持久化 scratch 根：环境变量 OCR_SCRATCH_ROOT，缺省系统临时目录下 cr-ocr-scratch。"""
+    return Path(os.environ.get("OCR_SCRATCH_ROOT", str(Path(tempfile.gettempdir()) / "cr-ocr-scratch")))
+
+
+def prune_scratch(root: Path, ttl_hours: float) -> list[str]:
+    """清掉 root 下 mtime 超过 ttl_hours 的 per-cid scratch 目录，返回被清 cid 名列表。
+
+    以目录 mtime 判龄：stage 写产物/progress.json 会更新 mtime。
+    注：按目录创建/首写时刻判龄，非最后访问——续跑覆盖写文件内容不会刷新目录本身的 mtime。
+    """
+    root = Path(root)
+    if not root.is_dir():
+        return []
+    cutoff = time.time() - ttl_hours * 3600
+    removed: list[str] = []
+    for child in root.iterdir():
+        if child.is_dir() and child.stat().st_mtime < cutoff:
+            shutil.rmtree(child, ignore_errors=True)
+            removed.append(child.name)
+    return removed
 
 
 def create_app(*, ingest_fn=None, reocr_fn=None, selftest_fn=None, warmup=True) -> FastAPI:
@@ -52,21 +78,33 @@ def create_app(*, ingest_fn=None, reocr_fn=None, selftest_fn=None, warmup=True) 
 
     @app.post("/ingest")
     def ingest_ep(file: UploadFile = File(...), contract_id: str | None = Form(None)) -> Response:
+        try:
+            ttl_hours = float(os.environ.get("OCR_SCRATCH_TTL_HOURS", "48"))
+        except ValueError:
+            ttl_hours = 48.0   # 环境变量误配为非数字 → 退回默认，不阻断入库
+        try:
+            prune_scratch(scratch_root(), ttl_hours)
+        except OSError:
+            pass   # 清理是尽力而为，失败不影响本次入库
         cid = ingest_mod.sanitize_id(contract_id) if contract_id else ingest_mod.sanitize_id(file.filename)
         if not cid:
             raise HTTPException(status_code=400, detail="无法确定合法 contract_id（请提供 contract_id 或用 ASCII 文件名）")
-        scratch = Path(tempfile.mkdtemp(prefix="cr-ingest-"))
-        try:
-            (scratch / "raw").mkdir(parents=True, exist_ok=True)
-            raw_pdf = scratch / "raw" / f"{cid}.pdf"
-            raw_pdf.write_bytes(file.file.read())
-            res = _ingest(cid, contracts_root=scratch, raw_pdf=raw_pdf)
-            if "error" in res:
-                raise HTTPException(status_code=500, detail=res.get("error", "入库失败"))
-            data = bundle.pack_dir(scratch / "derived", cid)
-            return Response(content=data, media_type="application/x-tar")
-        finally:
-            shutil.rmtree(scratch, ignore_errors=True)
+        # 按 cid 派生固定 scratch（续跑复用）；成功打包后才清，失败保留在磁盘
+        scratch = scratch_root() / cid
+        (scratch / "raw").mkdir(parents=True, exist_ok=True)
+        raw_pdf = scratch / "raw" / f"{cid}.pdf"
+        raw_pdf.write_bytes(file.file.read())
+        res = _ingest(cid, contracts_root=scratch, raw_pdf=raw_pdf)
+        if "error" in res:
+            # 结构化失败：透传 stage/log（此前被丢弃）；保留 scratch 供续跑
+            return JSONResponse(status_code=500, content={
+                "error": res.get("error", "入库失败"),
+                "stage": res.get("stage"),
+                "log": res.get("log", ""),
+            })
+        data = bundle.pack_dir(scratch / "derived", cid)
+        shutil.rmtree(scratch, ignore_errors=True)   # 全成功打包完才清
+        return Response(content=data, media_type="application/x-tar")
 
     @app.post("/reocr")
     def reocr_ep(file: UploadFile = File(...), contract_id: str = Form(...)) -> dict:
@@ -84,5 +122,11 @@ def create_app(*, ingest_fn=None, reocr_fn=None, selftest_fn=None, warmup=True) 
             return _reocr(cid, derived)
         finally:
             shutil.rmtree(scratch, ignore_errors=True)
+
+    @app.get("/ingest/status/{contract_id}")
+    def ingest_status_ep(contract_id: str) -> dict:
+        cid = ingest_mod.sanitize_id(contract_id)   # 归一，防只读目录穿越（与 /ingest 一致）
+        steps = read_progress(scratch_root() / cid) if cid else []
+        return {"contract_id": contract_id, "steps": steps}
 
     return app

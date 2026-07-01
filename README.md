@@ -13,8 +13,15 @@
 
 接口：
 - `GET  /health` → `{"ok": true}`
-- `POST /ingest` （form：`file`=PDF，可选 `contract_id`）→ 通用解析，返回 `derived/<id>/` 的 tar（`application/x-tar`）
+- `POST /ingest` （form：`file`=PDF，可选 `contract_id`）→ 通用解析，返回 `derived/<id>/` 的 tar（`application/x-tar`）；失败返回 HTTP 500 + 结构化 JSON `{"error", "stage", "log"}`（而非裸文本），便于调用方定位失败在哪个阶段
+- `GET  /ingest/status/{contract_id}` → `{"contract_id", "steps"}`，只读查询该合同当前 scratch 内 `progress.json`（各阶段 `stage/status/...`）；路由存在但无进度记录时返回 200 + `steps: []`（不是 404）
 - `POST /reocr` （form：`file`=旧 derived tar，`contract_id`）→ 重跑文本，返回新 document
+
+**scratch 持久化与续跑**：`/ingest` 按 `contract_id` 在私有 scratch 目录（不落 `contracts/`）落盘中间产物；**全部阶段成功、打包 tar 返回后才清**，**任一阶段失败则保留 scratch**，供下次用同一 `contract_id` 续跑（已完成阶段跳过，不重复耗时的 OCR/版面步骤）。每次 `/ingest` 请求前会尽力清理过期 scratch（TTL，见下）；清理失败不阻断本次入库。
+
+相关环境变量：
+- `OCR_SCRATCH_ROOT`：scratch 根目录，缺省系统临时目录下 `cr-ocr-scratch`。
+- `OCR_SCRATCH_TTL_HOURS`：scratch 保留时长（小时），缺省 `48`；按目录 mtime 判龄（写产物/续跑访问会刷新）；配成非数字时退回默认值，不阻断入库。
 
 ---
 
