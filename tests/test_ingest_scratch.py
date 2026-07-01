@@ -59,3 +59,23 @@ def test_failure_keeps_scratch_and_returns_structured_json(tmp_path, monkeypatch
 def test_scratch_root_default(monkeypatch):
     monkeypatch.delenv("OCR_SCRATCH_ROOT", raising=False)
     assert scratch_root().name == "cr-ocr-scratch"
+
+
+def test_bad_ttl_env_does_not_block_ingest(tmp_path, monkeypatch):
+    """OCR_SCRATCH_TTL_HOURS 非数字时不阻断 /ingest，应返 200。"""
+    monkeypatch.setenv("OCR_SCRATCH_ROOT", str(tmp_path))
+    monkeypatch.setenv("OCR_SCRATCH_TTL_HOURS", "abc")  # 坏 TTL
+
+    def fake_ingest(cid, *, contracts_root, raw_pdf=None):
+        # 造出 derived/<cid>/ 一个文件，返回成功
+        d = Path(contracts_root) / "derived" / cid
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "document.json").write_text("{}", encoding="utf-8")
+        return {"ok": True}
+
+    app = create_app(ingest_fn=fake_ingest, warmup=False)
+    with TestClient(app) as c:
+        r = _post(c)
+    # 虽然 TTL 坏，但入库仍应成功（清理是尽力而为）
+    assert r.status_code == 200
+    assert r.headers["content-type"] == "application/x-tar"

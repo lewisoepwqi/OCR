@@ -78,7 +78,11 @@ def create_app(*, ingest_fn=None, reocr_fn=None, selftest_fn=None, warmup=True) 
     @app.post("/ingest")
     def ingest_ep(file: UploadFile = File(...), contract_id: str | None = Form(None)) -> Response:
         try:
-            prune_scratch(scratch_root(), float(os.environ.get("OCR_SCRATCH_TTL_HOURS", "48")))
+            ttl_hours = float(os.environ.get("OCR_SCRATCH_TTL_HOURS", "48"))
+        except ValueError:
+            ttl_hours = 48.0   # 环境变量误配为非数字 → 退回默认，不阻断入库
+        try:
+            prune_scratch(scratch_root(), ttl_hours)
         except OSError:
             pass   # 清理是尽力而为，失败不影响本次入库
         cid = ingest_mod.sanitize_id(contract_id) if contract_id else ingest_mod.sanitize_id(file.filename)
