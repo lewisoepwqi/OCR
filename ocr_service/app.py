@@ -18,6 +18,7 @@ from fastapi.responses import JSONResponse, Response
 from common import bundle
 from . import health as health_mod
 from . import ingest as ingest_mod
+from .parser import read_progress
 
 
 def scratch_root() -> Path:
@@ -95,5 +96,11 @@ def create_app(*, ingest_fn=None, reocr_fn=None, selftest_fn=None, warmup=True) 
             return _reocr(cid, derived)
         finally:
             shutil.rmtree(scratch, ignore_errors=True)
+
+    @app.get("/ingest/status/{contract_id}")
+    def ingest_status_ep(contract_id: str) -> dict:
+        # 只读 scratch 内 progress.json（不校验 cid 合法性——纯只读查询，无副作用）
+        return {"contract_id": contract_id,
+                "steps": read_progress(scratch_root() / contract_id)}
 
     return app
