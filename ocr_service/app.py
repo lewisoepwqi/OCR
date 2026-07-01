@@ -29,7 +29,8 @@ def scratch_root() -> Path:
 def prune_scratch(root: Path, ttl_hours: float) -> list[str]:
     """清掉 root 下 mtime 超过 ttl_hours 的 per-cid scratch 目录，返回被清 cid 名列表。
 
-    以目录 mtime 判龄：stage 写产物/progress.json 会更新 mtime，续跑访问即保鲜。
+    以目录 mtime 判龄：stage 写产物/progress.json 会更新 mtime。
+    注：按目录创建/首写时刻判龄，非最后访问——续跑覆盖写文件内容不会刷新目录本身的 mtime。
     """
     root = Path(root)
     if not root.is_dir():
@@ -124,8 +125,8 @@ def create_app(*, ingest_fn=None, reocr_fn=None, selftest_fn=None, warmup=True) 
 
     @app.get("/ingest/status/{contract_id}")
     def ingest_status_ep(contract_id: str) -> dict:
-        # 只读 scratch 内 progress.json（不校验 cid 合法性——纯只读查询，无副作用）
-        return {"contract_id": contract_id,
-                "steps": read_progress(scratch_root() / contract_id)}
+        cid = ingest_mod.sanitize_id(contract_id)   # 归一，防只读目录穿越（与 /ingest 一致）
+        steps = read_progress(scratch_root() / cid) if cid else []
+        return {"contract_id": contract_id, "steps": steps}
 
     return app
