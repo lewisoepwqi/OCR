@@ -26,6 +26,23 @@ def scratch_root() -> Path:
     return Path(os.environ.get("OCR_SCRATCH_ROOT", str(Path(tempfile.gettempdir()) / "cr-ocr-scratch")))
 
 
+def prune_scratch(root: Path, ttl_hours: float) -> list[str]:
+    """清掉 root 下 mtime 超过 ttl_hours 的 per-cid scratch 目录，返回被清 cid 名列表。
+
+    以目录 mtime 判龄：stage 写产物/progress.json 会更新 mtime，续跑访问即保鲜。
+    """
+    root = Path(root)
+    if not root.is_dir():
+        return []
+    cutoff = time.time() - ttl_hours * 3600
+    removed: list[str] = []
+    for child in root.iterdir():
+        if child.is_dir() and child.stat().st_mtime < cutoff:
+            shutil.rmtree(child, ignore_errors=True)
+            removed.append(child.name)
+    return removed
+
+
 def create_app(*, ingest_fn=None, reocr_fn=None, selftest_fn=None, warmup=True) -> FastAPI:
     _ingest = ingest_fn or ingest_mod.ingest
 
@@ -60,6 +77,10 @@ def create_app(*, ingest_fn=None, reocr_fn=None, selftest_fn=None, warmup=True) 
 
     @app.post("/ingest")
     def ingest_ep(file: UploadFile = File(...), contract_id: str | None = Form(None)) -> Response:
+        try:
+            prune_scratch(scratch_root(), float(os.environ.get("OCR_SCRATCH_TTL_HOURS", "48")))
+        except OSError:
+            pass   # 清理是尽力而为，失败不影响本次入库
         cid = ingest_mod.sanitize_id(contract_id) if contract_id else ingest_mod.sanitize_id(file.filename)
         if not cid:
             raise HTTPException(status_code=400, detail="无法确定合法 contract_id（请提供 contract_id 或用 ASCII 文件名）")
