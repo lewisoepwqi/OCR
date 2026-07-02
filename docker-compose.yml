@@ -26,7 +26,7 @@ services:
     # 端到端通——才标 healthy；GPU 没了/OOM/模型缺失则 /ready 返 503 → 容器显 unhealthy。
     # start_period 给足首次模型下载/加载 + 自检时间（冷启动可能数分钟），期间不算失败。
     healthcheck:
-      test: ["CMD", "python", "-c",
+      test: ["CMD", "python3", "-c",
              "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8001/ready',timeout=8).status==200 else 1)"]
       interval: 30s
       timeout: 10s
