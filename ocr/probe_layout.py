@@ -111,11 +111,14 @@ def extract_boxes(result) -> list[dict]:
     return boxes or []
 
 
-def detect_layout(pages: list[dict], score_threshold: float) -> list[dict]:
-    """对每页跑 PP-DocLayoutV2，返回归一化后的区域（按阅读顺序：上→下、左→右）。"""
-    from paddlex import create_model  # 延迟导入
+def detect_layout(pages: list[dict], score_threshold: float, model=None) -> list[dict]:
+    """对每页跑 PP-DocLayoutV2，返回归一化后的区域（按阅读顺序：上→下、左→右）。
 
-    model = create_model(model_name="PP-DocLayoutV2", model_dir=str(MODEL_DIR), device=LAYOUT_DEVICE)
+    model 可传入已加载的模型复用（逐页/多次调用避免重载）；不传则内部创建。
+    """
+    if model is None:
+        from paddlex import create_model  # 延迟导入
+        model = create_model(model_name="PP-DocLayoutV2", model_dir=str(MODEL_DIR), device=LAYOUT_DEVICE)
     out_pages: list[dict] = []
     for pg in pages:
         results = model.predict(str(pg["path"]), batch_size=1)
