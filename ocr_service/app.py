@@ -129,4 +129,19 @@ def create_app(*, ingest_fn=None, reocr_fn=None, selftest_fn=None, warmup=True) 
         steps = read_progress(scratch_root() / cid) if cid else []
         return {"contract_id": contract_id, "steps": steps}
 
+    @app.post("/extract-marks")
+    def extract_marks_ep(file: UploadFile = File(...), kind: str = Form(...)) -> dict:
+        """通用提取标记：渲染页图 + (印章框+章文 | 全文字框)。不含任何应用概念。
+
+        供调用方据此做各自业务提取（如合同雷达的印鉴库：印章按框抠图、签名按网格切分）。
+        """
+        if kind not in ("signature", "seal"):
+            raise HTTPException(status_code=400, detail="kind 必须是 signature 或 seal")
+        with tempfile.NamedTemporaryFile(
+                suffix=Path(file.filename or "x.pdf").suffix, delete=False) as f:
+            f.write(file.file.read())
+            src = f.name
+        from .extract_marks import extract
+        return extract(kind, src)
+
     return app
