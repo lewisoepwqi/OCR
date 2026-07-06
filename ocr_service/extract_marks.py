@@ -17,9 +17,20 @@ import numpy as np
 
 
 def _default_render(path, out_dir, dpi):
-    """渲染 PDF/图片每页为 PNG。延迟导入 pypdfium2。"""
-    from ocr.probe_layout import render_pages
-    return render_pages(Path(path), Path(out_dir), dpi)
+    """PDF → 每页 PNG；单张图片 → 当作单页。内容探测：cv2 能读出即图片，否则按 PDF 渲染。
+
+    调用方可能传 PDF 或图片（截图）。pypdfium2 只吃 PDF，图片会抛异常，故先用 cv2 试读。
+    """
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    img = cv2.imread(str(path))              # 图片能解出；PDF/非图返回 None
+    if img is not None:
+        p = out_dir / "p1.png"
+        cv2.imwrite(str(p), img)
+        h, w = img.shape[:2]
+        return [{"page": 1, "path": p, "width_px": w, "height_px": h}]
+    from ocr.probe_layout import render_pages  # 延迟导入 pypdfium2（仅 PDF 路径需要）
+    return render_pages(Path(path), out_dir, dpi)
 
 
 def _default_page_image(png_path) -> np.ndarray:

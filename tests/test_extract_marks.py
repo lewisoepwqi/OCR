@@ -1,9 +1,31 @@
+from pathlib import Path
+
+import cv2
 import numpy as np
 from ocr_service import extract_marks
 
 
 def _fake_render(path, out_dir, dpi):
     return [{"page": 1, "path": "p1.png", "width_px": 100, "height_px": 100}]
+
+
+def test_default_render_treats_image_as_single_page(tmp_path):
+    """回归：上传图片（非 PDF）时，_default_render 用 cv2 当单页，不走 pypdfium2（否则 500）。"""
+    img_path = tmp_path / "shot.png"
+    cv2.imwrite(str(img_path), np.full((30, 50, 3), 255, np.uint8))
+    pages = extract_marks._default_render(str(img_path), tmp_path / "out", dpi=200)
+    assert len(pages) == 1
+    assert pages[0]["page"] == 1
+    assert pages[0]["width_px"] == 50 and pages[0]["height_px"] == 30
+    assert Path(pages[0]["path"]).exists()
+
+
+def test_extract_image_input_end_to_end(tmp_path):
+    """图片输入端到端（真 _default_render + 桩 ocr_fn，避开 paddle）：不再 500，返回单页。"""
+    img_path = tmp_path / "sig.png"
+    cv2.imwrite(str(img_path), np.full((40, 60, 3), 255, np.uint8))
+    res = extract_marks.extract("signature", str(img_path), ocr_fn=lambda p: [])
+    assert len(res["pages"]) == 1 and res["pages"][0]["width"] == 60
 
 
 def test_signature_returns_text_marks():
