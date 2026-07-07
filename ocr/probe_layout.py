@@ -1,11 +1,13 @@
-"""阶段 A 探针：PDF → 页图 → PP-DocLayoutV2 版面检测 → 打印区域尺寸报告。
+"""阶段 A 探针：页图 → PP-DocLayoutV2 版面检测 → 打印区域尺寸报告。
 
 本脚本只为回答开放项 1（"版面区域实际有多大、区域≈段落成不成立、要不要按行间距拆段落"），
 **不做 OCR 文字识别、不做字段抽取**。严格遵守 kickoff_prompt「先看尺寸再往下做」。
 
+**OCR 不碰 PDF**：页图渲染由调用方业务层完成（contract_radar `ocr/render.py`），
+本模块只读现有 `derived/<id>/pages/pN.png` 做版面检测。
+
 用法：
-    .venv/bin/python -m ocr.probe_layout                 # 自动取 contracts/raw/ 下第一个 PDF
-    .venv/bin/python -m ocr.probe_layout --pdf <路径> --id <合同id>
+    .venv/bin/python -m ocr.probe_layout --id <合同id>    # 读 derived/<id>/pages/ 下已渲染好的页图
 """
 
 from __future__ import annotations
@@ -21,9 +23,7 @@ CONTRACTS = Path(os.environ.get("CR_CONTRACTS_ROOT", ROOT / "contracts"))
 MODEL_DIR = ROOT / "models" / "pp_doclayout_v2"
 # 版面检测设备：默认 gpu（独立 OCR 仓部署在 GPU 服务器）；纯 CPU 环境置 OCR_DEVICE=cpu 兜底。
 LAYOUT_DEVICE = os.environ.get("OCR_DEVICE", "gpu")
-DATA_RAW = CONTRACTS / "raw"
 DATA_DERIVED = CONTRACTS / "derived"
-RENDER_DPI = 200
 SCORE_THRESHOLD = 0.5
 PIPELINE_VERSION = "probe-layout-0.1"
 
@@ -62,40 +62,15 @@ def map_role(label: str) -> str:
     return _LABEL_TO_ROLE.get(label.strip().lower(), "text")
 
 
-def find_pdf(explicit: str | None) -> Path:
-    """定位待处理 PDF：优先 --pdf，否则取 contracts/raw/ 下第一个。"""
-    if explicit:
-        p = Path(explicit)
-        if not p.is_file():
-            sys.exit(f"找不到 PDF：{p}")
-        return p
-    pdfs = sorted(DATA_RAW.rglob("*.pdf"))
-    if not pdfs:
-        sys.exit(f"contracts/raw/ 下没有 PDF：{DATA_RAW}")
-    if len(pdfs) > 1:
-        print(f"[提示] raw/ 下有 {len(pdfs)} 个 PDF，取第一个：{pdfs[0].name}")
-    return pdfs[0]
-
-
-def render_pages(pdf_path: Path, out_dir: Path, dpi: int) -> list[dict]:
-    """用 pypdfium2 渲染每页为 PNG（raw/ 原件只读，只读取不写回）。"""
-    import pypdfium2 as pdfium  # 延迟导入，等依赖装好后才用
-
-    out_dir.mkdir(parents=True, exist_ok=True)
-    pages: list[dict] = []
-    pdf = pdfium.PdfDocument(str(pdf_path))
-    try:
-        scale = dpi / 72.0
-        for i in range(len(pdf)):
-            page = pdf[i]
-            pil = page.render(scale=scale).to_pil()
-            png_path = out_dir / f"p{i + 1}.png"
-            pil.save(png_path)
-            pages.append({"page": i + 1, "path": png_path,
-                          "width_px": pil.width, "height_px": pil.height})
-    finally:
-        pdf.close()
-    return pages
+def load_pages(pages_dir: Path) -> list[dict]:
+    """读现有 pages/pN.png（尺寸从 PNG 取），返回按页号排序的页元数据。渲染由调用方业务层完成。"""
+    from PIL import Image
+    metas = []
+    for p in sorted(Path(pages_dir).glob("p*.png"), key=lambda x: int(x.stem[1:])):
+        with Image.open(p) as im:
+            w, h = im.size
+        metas.append({"page": int(p.stem[1:]), "path": p, "width_px": w, "height_px": h})
+    return metas
 
 
 def extract_boxes(result) -> list[dict]:
@@ -188,29 +163,24 @@ def build_report(layout: dict, assumed_line_norm: float = 18.0) -> str:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--pdf")
-    ap.add_argument("--id")
+    ap.add_argument("--id", required=True)
     args = ap.parse_args()
-
-    pdf_path = find_pdf(args.pdf)
-    contract_id = args.id or pdf_path.stem
+    contract_id = args.id
     derived = DATA_DERIVED / contract_id
+    pages_dir = derived / "pages"
+    if not pages_dir.is_dir():
+        sys.exit(f"缺少页图目录（应由调用方渲染）：{pages_dir}")
 
-    print(f"[1/3] 渲染页图：{pdf_path.name} → {derived/'pages'}（DPI={RENDER_DPI}）")
-    pages = render_pages(pdf_path, derived / "pages", RENDER_DPI)
+    print(f"[1/2] 读页图：{pages_dir}")
+    pages = load_pages(pages_dir)
     print(f"      共 {len(pages)} 页")
 
-    print("[2/3] 版面检测：PP-DocLayoutV2（CPU）")
+    print("[2/2] 版面检测：PP-DocLayoutV2")
     out_pages = detect_layout(pages, SCORE_THRESHOLD)
     layout = {"contract_id": contract_id, "pipeline_version": PIPELINE_VERSION, "pages": out_pages}
     (derived / "layout.json").write_text(json.dumps(layout, ensure_ascii=False, indent=2), encoding="utf-8")
+    (derived / "layout_report.md").write_text(build_report(layout), encoding="utf-8")
     print(f"      已写 {derived/'layout.json'}")
-
-    print("[3/3] 生成区域尺寸报告")
-    report = build_report(layout)
-    (derived / "layout_report.md").write_text(report, encoding="utf-8")
-    print("\n" + report + "\n")
-    print(f"报告已写 {derived/'layout_report.md'}")
 
 
 if __name__ == "__main__":

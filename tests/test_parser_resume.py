@@ -28,8 +28,7 @@ def _make_runner(calls, fail_stage=None):
 
 def test_all_stages_run_when_fresh(tmp_path: Path):
     calls = []
-    res = parse("c1", contracts_root=tmp_path, raw_pdf=tmp_path / "x.pdf",
-                runner=_make_runner(calls))
+    res = parse("c1", contracts_root=tmp_path, runner=_make_runner(calls))
     assert res == {"ok": True}
     assert calls == ["probe_layout", "build_document", "recognize_tables", "recognize_seals"]
     prog = read_progress(tmp_path)
@@ -58,14 +57,13 @@ def test_half_written_artifact_not_trusted(tmp_path: Path):
     derived.mkdir(parents=True)
     (derived / "layout.json").write_text("{ broken", encoding="utf-8")
     calls = []
-    parse("c1", contracts_root=tmp_path, raw_pdf=tmp_path / "x.pdf",
-          runner=_make_runner(calls))
+    parse("c1", contracts_root=tmp_path, runner=_make_runner(calls))
     assert "probe_layout" in calls
 
 
 def test_failure_returns_stage_and_writes_progress(tmp_path: Path):
     calls = []
-    res = parse("c1", contracts_root=tmp_path, raw_pdf=tmp_path / "x.pdf",
+    res = parse("c1", contracts_root=tmp_path,
                 runner=_make_runner(calls, fail_stage="recognize_tables"))
     assert res["stage"] == "recognize_tables" and "boom" in res["log"]
     prog = {p["stage"]: p["status"] for p in read_progress(tmp_path)}

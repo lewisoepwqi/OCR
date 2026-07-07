@@ -13,24 +13,34 @@ class BundleError(Exception):
     """打包/解包失败或检测到非法成员（路径穿越/前缀不符）。"""
 
 
-def pack_dir(parent: Path, name: str, include: list[str] | None = None) -> bytes:
+def pack_dir(parent: Path, name: str, include: list[str] | None = None,
+             exclude: list[str] | None = None) -> bytes:
     """把 parent/name/ 打成 tar（归档名以 name/ 为前缀）。
 
-    include 给定时只打 parent/name/<inc> 这些顶层项（文件或目录），用于 /reocr 只带 layout+pages。
-    页图本就 PNG 压缩，不再 gzip。
+    include 给定时只打 parent/name/<inc> 这些顶层项；
+    exclude 给定时打全部顶层项但跳过这些名字（用于 /ingest 返回时排除 pages，调用方已有）。
+    include 与 exclude 互斥。页图本就 PNG 压缩，不再 gzip。
     """
+    if include is not None and exclude is not None:
+        raise ValueError("include 与 exclude 互斥，不能同时给")
     base = Path(parent) / name
     if not base.is_dir():
         raise BundleError(f"待打包目录不存在：{base}")
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w") as tf:
-        if include is None:
-            tf.add(base, arcname=name)
-        else:
+        if include is not None:
             for inc in include:
                 p = base / inc
                 if p.exists():
                     tf.add(p, arcname=f"{name}/{inc}")
+        elif exclude is not None:
+            skip = set(exclude)
+            for child in sorted(base.iterdir()):
+                if child.name in skip:
+                    continue
+                tf.add(child, arcname=f"{name}/{child.name}")
+        else:
+            tf.add(base, arcname=name)
     return buf.getvalue()
 
 

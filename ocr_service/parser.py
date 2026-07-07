@@ -58,12 +58,12 @@ def _artifact_complete(contracts_root, contract_id: str, stage: str) -> bool:
         return False
 
 
-def parse(contract_id: str, *, contracts_root, raw_pdf=None, runner=subprocess.run) -> dict:
+def parse(contract_id: str, *, contracts_root, runner=subprocess.run) -> dict:
     """按序跑通用解析 stage（已完成步跳过）；全过→{ok}；失败→{error,stage,log}。
 
     contracts_root：OCR 私有 scratch 根（置 CR_CONTRACTS_ROOT，stage 读写都落它）。
-    raw_pdf：scratch 内源 PDF 路径，传给 probe_layout --pdf。
-    逐步状态写 contracts_root/progress.json。
+    页图已由调用方业务层渲染落 contracts_root/derived/<cid>/pages/，probe_layout 只 --id 读它，
+    本函数不再碰 PDF。逐步状态写 contracts_root/progress.json。
     """
     env = {**os.environ,
            "DISABLE_MODEL_SOURCE_CHECK": "True",
@@ -80,8 +80,6 @@ def parse(contract_id: str, *, contracts_root, raw_pdf=None, runner=subprocess.r
         _write_progress(contracts_root, steps)
 
         cmd = [sys.executable, str(ROOT / "ocr" / f"{stage}.py"), "--id", contract_id]
-        if stage == "probe_layout" and raw_pdf is not None:
-            cmd += ["--pdf", str(raw_pdf)]
         res = runner(cmd, capture_output=True, text=True, env=env)
         if res.returncode != 0:
             log = (res.stderr or res.stdout or "")[-2000:]

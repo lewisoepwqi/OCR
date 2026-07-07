@@ -12,5 +12,5 @@ from .parser import GENERIC_STAGES, parse
 STAGES = GENERIC_STAGES
 
 
-def ingest(contract_id: str, *, contracts_root, raw_pdf=None, runner=subprocess.run) -> dict:
-    return parse(contract_id, contracts_root=contracts_root, raw_pdf=raw_pdf, runner=runner)
+def ingest(contract_id: str, *, contracts_root, runner=subprocess.run) -> dict:
+    return parse(contract_id, contracts_root=contracts_root, runner=runner)
