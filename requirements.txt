@@ -4,7 +4,6 @@
 paddlex[ocr]==3.7.1
 paddleocr==3.7.0
 opencv-contrib-python==4.10.0.84
-pypdfium2==5.10.1
 Pillow==12.2.0
 jieba==0.42.1
 PyYAML
