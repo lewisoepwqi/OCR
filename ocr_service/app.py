@@ -1,4 +1,4 @@
-"""OCR 服务 FastAPI 绑定：/health、/ingest（上传 PDF→私有 scratch→返 derived tar）、/reocr（重跑产新 document）。
+"""OCR 服务 FastAPI 绑定：/health、/ingest（收页图 tar→私有 scratch→返 derived tar，排除 pages）、/reocr（重跑产新 document）。
 
 把进程内 ocr/ 包成 HTTP（HANDOFF §15 服务化口子）。ingest_fn/reocr_fn 可注入便于测试。
 /ingest 在私有 scratch 干活，不写 contracts/；产出 derived/<cid>/ 打成 tar 返回。
@@ -91,10 +91,14 @@ def create_app(*, ingest_fn=None, reocr_fn=None, selftest_fn=None, warmup=True) 
             raise HTTPException(status_code=400, detail="无法确定合法 contract_id（请提供 contract_id 或用 ASCII 文件名）")
         # 按 cid 派生固定 scratch（续跑复用）；成功打包后才清，失败保留在磁盘
         scratch = scratch_root() / cid
-        (scratch / "raw").mkdir(parents=True, exist_ok=True)
-        raw_pdf = scratch / "raw" / f"{cid}.pdf"
-        raw_pdf.write_bytes(file.file.read())
-        res = _ingest(cid, contracts_root=scratch, raw_pdf=raw_pdf)
+        derived = scratch / "derived"
+        derived.mkdir(parents=True, exist_ok=True)
+        # 收页图 tar（调用方业务层渲染），解包进 scratch/derived/<cid>/pages/（防穿越）
+        try:
+            bundle.unpack_dir(file.file.read(), derived, cid)
+        except bundle.BundleError as e:
+            raise HTTPException(status_code=400, detail=f"非法页图包：{e}")
+        res = _ingest(cid, contracts_root=scratch)
         if "error" in res:
             # 结构化失败：透传 stage/log（此前被丢弃）；保留 scratch 供续跑
             return JSONResponse(status_code=500, content={
@@ -102,7 +106,7 @@ def create_app(*, ingest_fn=None, reocr_fn=None, selftest_fn=None, warmup=True) 
                 "stage": res.get("stage"),
                 "log": res.get("log", ""),
             })
-        data = bundle.pack_dir(scratch / "derived", cid)
+        data = bundle.pack_dir(scratch / "derived", cid, exclude=["pages"])
         shutil.rmtree(scratch, ignore_errors=True)   # 全成功打包完才清
         return Response(content=data, media_type="application/x-tar")
 
