@@ -97,7 +97,7 @@ def create_app(*, ingest_fn=None, reocr_fn=None, selftest_fn=None, warmup=True) 
         try:
             bundle.unpack_dir(file.file.read(), derived, cid)
         except bundle.BundleError as e:
-            raise HTTPException(status_code=400, detail=f"非法页图包：{e}")
+            raise HTTPException(status_code=400, detail=f"非法页图包：{e}（tar 顶层目录名须与 contract_id 一致，结构见 README）")
         res = _ingest(cid, contracts_root=scratch)
         if "error" in res:
             # 结构化失败：透传 stage/log（此前被丢弃）；保留 scratch 供续跑
@@ -122,7 +122,7 @@ def create_app(*, ingest_fn=None, reocr_fn=None, selftest_fn=None, warmup=True) 
             try:
                 bundle.unpack_dir(file.file.read(), derived, cid)
             except bundle.BundleError as e:
-                raise HTTPException(status_code=400, detail=f"非法包：{e}")
+                raise HTTPException(status_code=400, detail=f"非法包：{e}（tar 顶层目录名须与 contract_id 一致，结构见 README）")
             return _reocr(cid, derived)
         finally:
             shutil.rmtree(scratch, ignore_errors=True)
@@ -135,9 +135,11 @@ def create_app(*, ingest_fn=None, reocr_fn=None, selftest_fn=None, warmup=True) 
 
     @app.post("/extract-marks")
     def extract_marks_ep(file: UploadFile = File(...), kind: str = Form(...)):
-        """通用提取标记：渲染页图 + (印章框+章文 | 全文字框)。不含任何应用概念。
+        """通用提取标记：输入一张页图 → (印章框+章文 | 全文字框)。不含任何应用概念。
 
-        接受 PDF 或图片；供调用方据此做各自业务提取。失败返 500 + 结构化 {error, stage, log}。
+        ⚠ 只接受图片（PNG/JPG 等）；PDF 须先在调用方转成图片再逐页上传（本接口不做 PDF 渲染，
+        传 PDF 会以「无法读取图片（OCR 只接受图片，PDF→图片请在调用方完成）」报错）。
+        失败返 500 + 结构化 {error, stage, log}。
         """
         if kind not in ("signature", "seal"):
             raise HTTPException(status_code=400, detail="kind 必须是 signature 或 seal")

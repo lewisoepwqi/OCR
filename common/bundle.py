@@ -61,6 +61,9 @@ def unpack_dir(data: bytes, dest_parent: Path, name: str) -> None:
             target = (dest_parent / m.name).resolve()
             # 必须严格落在 dest_parent/name/ 之内（含等于 safe_root 自身）
             if target != safe_root and safe_root not in target.parents:
-                raise BundleError(f"非法成员路径（疑似穿越/前缀不符）：{m.name}")
+                raise BundleError(
+                    f"非法成员路径（疑似穿越/前缀不符）：{m.name!r}"
+                    f" —— tar 内所有成员必须落在顶层目录 {name!r}/ 之下"
+                )
         # filter="data"：标准库纵深防护（拒绝绝对路径/链接/设备、钳制权限），与上方逐成员校验互补
         tf.extractall(dest_parent, members=members, filter="data")

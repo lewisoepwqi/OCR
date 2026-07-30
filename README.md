@@ -16,6 +16,19 @@
 - `POST /ingest` （form：`file`=PDF，可选 `contract_id`）→ 通用解析，返回 `derived/<id>/` 的 tar（`application/x-tar`）；失败返回 HTTP 500 + 结构化 JSON `{"error", "stage", "log"}`（而非裸文本），便于调用方定位失败在哪个阶段
 - `GET  /ingest/status/{contract_id}` → `{"contract_id", "steps"}`，只读查询该合同当前 scratch 内 `progress.json`（各阶段 `stage/status/...`）；路由存在但无进度记录时返回 200 + `steps: []`（不是 404）
 - `POST /reocr` （form：`file`=旧 derived tar，`contract_id`）→ 重跑文本，返回新 document
+- `POST /extract-marks`（form：`file`，`kind`=`signature|seal`）→ 通用提取标记（印章框+章文 或 全文字框），**只接受图片**（PNG/JPG），PDF 须在调用方先转成图片；不含任何应用概念，失败返 500 + 结构化 JSON
+
+**tar 包结构（`/ingest` 与 `/reocr` 的上传包硬约束）**：上传的 tar，**顶层目录名必须与 `contract_id` 一致**（经 `sanitize_id` 归一后的值），否则防穿越校验会以
+`非法成员路径（疑似穿越/前缀不符）` 拒绝。标准结构：
+```text
+<contract_id>/
+  pages/
+    p1.png
+    p2.png
+    ...
+```
+> 即成员路径必须是 `<contract_id>/...`，不能是 `pages/1.png`（缺顶层目录）或别的目录名。
+> `/reocr` 的 `contract_id` 还要求 `sanitize_id(contract_id) == contract_id`（已是合法形式）。
 
 **scratch 持久化与续跑**：`/ingest` 按 `contract_id` 在私有 scratch 目录（不落 `contracts/`）落盘中间产物；**全部阶段成功、打包 tar 返回后才清**，**任一阶段失败则保留 scratch**，供下次用同一 `contract_id` 续跑（已完成阶段跳过，不重复耗时的 OCR/版面步骤）。每次 `/ingest` 请求前会尽力清理过期 scratch（TTL，见下）；清理失败不阻断本次入库。
 
@@ -106,6 +119,34 @@ curl -F file=@sample.pdf http://localhost:8001/ingest -o out.tar && tar tf out.t
 > **GPU 利用范围**：文字识别 / 表格 / 印章（PaddleOCR、PaddleX pipeline）自动用 GPU；
 > 版面检测（`ocr/probe_layout.py`）**默认也用 GPU**（`device` 取环境变量 `OCR_DEVICE`，默认 `gpu`）。
 > 纯 CPU 环境兜底：在 `docker-compose.yml` 给 ocr-service 加 `OCR_DEVICE=cpu`（注意此时还要换 CPU 版 paddle，见 Dockerfile 注释）。
+
+---
+
+## 四补、显存画像与共卡（重要，给同卡部署其它服务的人看）
+
+本服务钉在 **GPU 1**（`docker-compose.yml` 的 `device_ids: ['1']`）。PaddlePaddle 的显存是**按需分配**的，不同接口的峰值相差极大：
+
+| 状态 | 实测显存 |
+|---|---|
+| 空闲（冷启动，模型未驻留） | 382 MiB |
+| 空闲（热，模型已驻留） | 约 1,560 MiB（当前实测） |
+| 轻量 `/extract-marks`（30 页，仅印章/文字框） | 峰值约 650 MiB |
+| **完整 `/ingest`（30 页，含表格识别 `recognize_tables`）** | **6,926 MiB** |
+
+**结论：轻量接口与生产 `/ingest` 的显存差约 25 倍。给同卡服务分配显存时，必须用 `/ingest` 全流水线的峰值，绝不能用 `/extract-marks` 或空闲值，否则 `/ingest` 跑到 `recognize_tables` 阶段必 OOM。**
+
+### 2026-07-30 事故复盘
+
+有人按 `/extract-marks` 的轻量数字（~650 MiB）给同卡（GPU 1）新部署的 Rerank-VL 分配显存，结果生产 `/ingest` 在 `recognize_tables` 阶段 OOM：
+`ResourceExhaustedError: ... AsyncAllocation ... need 433MB ... but only free 292MB`。
+
+根因在于两种框架的分配策略相反：
+- **PaddlePaddle（本服务）**：按需分配，**申请不到立刻崩**（单次前向失败即 `ResourceExhaustedError`）。
+- **vLLM（Rerank-VL 等）**：启动时**预分配**一个池子并占住不放。
+
+共卡时**先到者恒赢**：vLLM 启动时把池子占满，PaddleOCR 跑到重接口时临时申请不到就崩。所以共卡规划必须**为 PaddleOCR 预留其生产峰值（6,926 MiB）**，而不是它的当前/空闲占用。
+
+> 压测/容量评估**必须走 `/ingest` 全流水线**（带表格识别的真实 PDF），不能用 `/extract-marks` 这种轻量接口的数字。
 
 ---
 
