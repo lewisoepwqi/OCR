@@ -62,3 +62,62 @@ def test_warmup_runs_injected_selftest_on_startup():
             time.sleep(0.02)
         assert c.get("/ready").status_code == 200
         assert calls == [1]              # 自检恰跑一次
+
+
+def test_recheck_failure_downgrades_ready():
+    # 运行期复检失败（GPU 消失）→ ready 翻 False、/ready 503 且 error 可观测
+    app = create_app(warmup=False)
+    app.state.readiness.run(lambda: {"device": "gpu", "gpu_count": 1})
+    app.state.readiness.run_recheck(lambda: (_ for _ in ()).throw(RuntimeError("可见 GPU 数为 0")))
+    with TestClient(app) as c:
+        r = c.get("/ready")
+        assert r.status_code == 503
+        assert "可见 GPU 数为 0" in r.json()["error"]
+
+
+def test_recheck_success_restores_after_recheck_failure():
+    # 复检失败降级后、复检又通过 → 恢复就绪（GPU 无需重启容器即回来时不卡死在 503）
+    app = create_app(warmup=False)
+    rd = app.state.readiness
+    rd.run(lambda: {"device": "gpu", "gpu_count": 1})
+    rd.run_recheck(lambda: (_ for _ in ()).throw(RuntimeError("GPU 丢失")))
+    rd.run_recheck(lambda: {"gpu_count": 1})
+    with TestClient(app) as c:
+        assert c.get("/ready").status_code == 200
+
+
+def test_recheck_success_does_not_rescue_failed_selftest():
+    # 启动自检失败（推理端到端没过）不因 GPU 复检通过而翻盘——推理没重验过，不冒充就绪
+    app = create_app(warmup=False)
+    rd = app.state.readiness
+    rd.run(lambda: (_ for _ in ()).throw(RuntimeError("模型加载失败")))
+    rd.run_recheck(lambda: {"gpu_count": 1})
+    with TestClient(app) as c:
+        assert c.get("/ready").status_code == 503
+
+
+def test_default_selftest_rejects_gpu_missing(monkeypatch):
+    # 2026-08-17 事故回归：期望 GPU 但 paddle 数到 0 卡 → 自检必须失败（而非记录后放行）
+    import sys
+    import types
+    fake_paddle = types.SimpleNamespace(device=types.SimpleNamespace(cuda=types.SimpleNamespace(device_count=lambda: 0)))
+    monkeypatch.setitem(__import__("os").environ, "OCR_DEVICE", "gpu")
+    monkeypatch.setitem(sys.modules, "paddle", fake_paddle)
+    from ocr_service.health import default_selftest
+    try:
+        default_selftest()
+        raised = False
+    except RuntimeError as e:
+        raised = "可见 GPU 数为 0" in str(e)
+    assert raised
+
+
+def test_gpu_recheck_passes_with_cpu_device(monkeypatch):
+    # OCR_DEVICE=cpu（纯 CPU 兜底部署）：复探不因 0 卡而失败
+    import sys
+    import types
+    fake_paddle = types.SimpleNamespace(device=types.SimpleNamespace(cuda=types.SimpleNamespace(device_count=lambda: 0)))
+    monkeypatch.setitem(__import__("os").environ, "OCR_DEVICE", "cpu")
+    monkeypatch.setitem(sys.modules, "paddle", fake_paddle)
+    from ocr_service.health import gpu_recheck
+    assert gpu_recheck() == {"gpu_count": 0}

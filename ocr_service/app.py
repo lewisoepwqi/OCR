@@ -60,6 +60,14 @@ def create_app(*, ingest_fn=None, reocr_fn=None, selftest_fn=None, warmup=True) 
         # 启动即后台跑一次就绪自检（不阻塞监听；自检期间 /ready 返 503，跑完转就绪）
         if warmup:
             readiness.start(_selftest)
+            # 周期 GPU 复检：启动自检过了也可能在运行中丢 GPU（cgroup 设备 BPF 丢失、
+            # 驱动变更），/ready 不能永远引用启动时刻的结论。默认 60s，<=0 关闭。
+            # 纯 CPU 部署（OCR_DEVICE=cpu）下探测恒通过，开着也无害。
+            try:
+                interval = float(os.environ.get("OCR_READY_RECHECK_SECONDS", "60"))
+            except ValueError:
+                interval = 60.0   # 环境变量误配为非数字 → 退回默认，不阻断启动
+            readiness.start_recheck(health_mod.gpu_recheck, interval)
         yield
 
     app = FastAPI(title="合同雷达 OCR 服务", version="0.1", lifespan=lifespan)

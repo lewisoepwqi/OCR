@@ -20,10 +20,18 @@ services:
     environment:
       - OCR_HOST=0.0.0.0
       - OCR_PORT=8001
+      # 显式声明 GPU 运行（而非靠代码默认值）：自检/复检据此强校验——期望 gpu 却见 0 卡
+      # → /ready 503 → 容器 unhealthy（2026-08-17 事故：GPU 静默丢失、CPU 慢跑 13 天无人察觉）。
+      # 纯 CPU 兜底部署改 OCR_DEVICE=cpu。
+      - OCR_DEVICE=gpu
+      # /ready 周期 GPU 复检间隔（秒）；<=0 关闭。默认 60s。
+      - OCR_READY_RECHECK_SECONDS=60
     ports:
       - "8001:8001"
     # 健康监控指向 /ready（就绪）而非 /health（仅存活）：启动自检过了——模型加载 + GPU + 推理
     # 端到端通——才标 healthy；GPU 没了/OOM/模型缺失则 /ready 返 503 → 容器显 unhealthy。
+    # /ready 还每 OCR_READY_RECHECK_SECONDS 复探 GPU 可见性：运行中丢 GPU（cgroup 设备
+    # 过滤器丢失/驱动变更）也会在数个周期内转 unhealthy，不再冒充就绪。
     # start_period 给足首次模型下载/加载 + 自检时间（冷启动可能数分钟），期间不算失败。
     healthcheck:
       test: ["CMD", "python3", "-c",

@@ -20,6 +20,7 @@ class Readiness:
         self._state: dict = {"ready": False, "device": None, "gpu_count": None,
                              "ms": None, "error": "warming up", "checked_at": None}
         self._lock = threading.Lock()
+        self._recheck_failed = False   # 当前是否处于「因运行期复检失败而降级」状态
 
     def get(self) -> dict:
         with self._lock:
@@ -52,6 +53,41 @@ class Readiness:
         t.start()
         return t
 
+    def run_recheck(self, probe_fn) -> None:
+        """运行期轻量复检（如 GPU 可见性探测，不跑推理）：
+        - 失败 → ready=False 并记 error（运行期 GPU 丢失要可观测，不能冒充就绪）；
+        - 此前**因复检失败**而降级、现在复检通过 → 恢复 ready=True。
+          启动自检（端到端推理）失败不因复检成功翻盘——推理没重验过，不冒充就绪。"""
+        try:
+            info = probe_fn() or {}
+            with self._lock:
+                if self._recheck_failed:
+                    self._recheck_failed = False
+                    self._state.update(ready=True, error=None,
+                                       checked_at=time.strftime("%Y-%m-%dT%H:%M:%S"))
+                    if info.get("gpu_count") is not None:
+                        self._state["gpu_count"] = info["gpu_count"]
+        except Exception as e:  # noqa: BLE001 任何复检失败都归为「未就绪」并记原因
+            with self._lock:
+                self._recheck_failed = True
+                self._state.update(ready=False,
+                                   error=f"运行期复检失败 {type(e).__name__}: {e}",
+                                   checked_at=time.strftime("%Y-%m-%dT%H:%M:%S"))
+
+    def start_recheck(self, probe_fn, interval: float) -> threading.Thread | None:
+        """后台 daemon 线程周期复检。interval<=0 时不启动（测试/纯 CPU 部署可关）。"""
+        if interval <= 0:
+            return None
+
+        def loop() -> None:
+            while True:
+                time.sleep(interval)
+                self.run_recheck(probe_fn)
+
+        t = threading.Thread(target=loop, name="ocr-gpu-recheck", daemon=True)
+        t.start()
+        return t
+
 
 def default_selftest() -> dict:
     """真实自检：构造 PP-OCRv6 引擎，对一张极小合成图跑一次推理——证明 paddle+GPU+模型+推理端到端通。
@@ -74,6 +110,13 @@ def default_selftest() -> dict:
         gpu_count = paddle.device.cuda.device_count()
     except Exception:                       # noqa: BLE001 取不到 GPU 数不影响自检主体
         pass
+    # 期望 GPU 却数到 0 卡 → 自检直接失败（/ready 503、容器 unhealthy）。
+    # 2026-08-17 事故教训：cgroup 设备过滤器丢失后 paddle 静默降级 CPU，此处若只记录
+    # 不拦截，/ready 会一直 200，OCR 在 CPU 上慢跑 13 天无人察觉。
+    if device == "gpu" and (gpu_count or 0) == 0:
+        raise RuntimeError(
+            f"OCR_DEVICE=gpu 但可见 GPU 数为 {gpu_count}——设备权限可能丢失"
+            "（cgroup 设备过滤器/驱动变更），重启容器可恢复；确要纯 CPU 部署请显式设 OCR_DEVICE=cpu")
 
     tmp = Path(tempfile.mkdtemp(prefix="cr-ocr-selftest-"))
     try:
@@ -86,3 +129,20 @@ def default_selftest() -> dict:
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     return {"device": device, "gpu_count": gpu_count}
+
+
+def gpu_recheck() -> dict:
+    """轻量运行期复检：只数 GPU 设备、不跑推理（毫秒级，供 /ready 周期刷新）。
+
+    期望 gpu 而数到 0 卡 → 抛异常。动机：2026-08-17 宿主机重启后容器 cgroup 设备
+    BPF 丢失，GPU 在容器运行中消失而启动自检早已通过、/ready 永远 200——OCR 静默
+    降级 CPU 慢跑多日。此探测让这类运行期故障在 healthcheck 周期内显形。
+    """
+    device = os.environ.get("OCR_DEVICE", "gpu")
+    import paddle
+    n = paddle.device.cuda.device_count()
+    if device == "gpu" and n == 0:
+        raise RuntimeError(
+            "期望 GPU（OCR_DEVICE=gpu）但可见 GPU 数为 0——设备权限可能丢失"
+            "（cgroup 设备过滤器/驱动变更），请重启容器恢复")
+    return {"gpu_count": n}
