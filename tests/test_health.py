@@ -97,15 +97,12 @@ def test_recheck_success_does_not_rescue_failed_selftest():
 
 
 def test_default_selftest_rejects_gpu_missing(monkeypatch):
-    # 2026-08-17 事故回归：期望 GPU 但 paddle 数到 0 卡 → 自检必须失败（而非记录后放行）
-    import sys
-    import types
-    fake_paddle = types.SimpleNamespace(device=types.SimpleNamespace(cuda=types.SimpleNamespace(device_count=lambda: 0)))
+    # 2026-08-17 事故回归：期望 GPU 但数到 0 卡 → 自检必须失败（而非记录后放行）
     monkeypatch.setitem(__import__("os").environ, "OCR_DEVICE", "gpu")
-    monkeypatch.setitem(sys.modules, "paddle", fake_paddle)
-    from ocr_service.health import default_selftest
+    import ocr_service.health as h
+    monkeypatch.setattr(h, "_visible_gpu_count", lambda: 0)
     try:
-        default_selftest()
+        h.default_selftest()
         raised = False
     except RuntimeError as e:
         raised = "可见 GPU 数为 0" in str(e)
@@ -114,10 +111,56 @@ def test_default_selftest_rejects_gpu_missing(monkeypatch):
 
 def test_gpu_recheck_passes_with_cpu_device(monkeypatch):
     # OCR_DEVICE=cpu（纯 CPU 兜底部署）：复探不因 0 卡而失败
+    monkeypatch.setitem(__import__("os").environ, "OCR_DEVICE", "cpu")
+    import ocr_service.health as h
+    monkeypatch.setattr(h, "_visible_gpu_count", lambda: 0)
+    assert h.gpu_recheck() == {"gpu_count": 0}
+
+
+def test_gpu_recheck_ignores_paddle_cached_count(monkeypatch):
+    # 2026-08-19 二次事故回归：容器运行中丢 GPU 后，服务进程里的 paddle.device_count
+    # 恒返回启动时的缓存旧值 1——复检若信它就永远「通过」。复检必须用真实系统调用
+    # 探测（_visible_gpu_count），paddle 缓存说 1 而设备节点打不开时必须报失败。
+    monkeypatch.setitem(__import__("os").environ, "OCR_DEVICE", "gpu")
     import sys
     import types
-    fake_paddle = types.SimpleNamespace(device=types.SimpleNamespace(cuda=types.SimpleNamespace(device_count=lambda: 0)))
-    monkeypatch.setitem(__import__("os").environ, "OCR_DEVICE", "cpu")
+    fake_paddle = types.SimpleNamespace(device=types.SimpleNamespace(cuda=types.SimpleNamespace(device_count=lambda: 1)))
     monkeypatch.setitem(sys.modules, "paddle", fake_paddle)
-    from ocr_service.health import gpu_recheck
-    assert gpu_recheck() == {"gpu_count": 0}
+    import ocr_service.health as h
+    monkeypatch.setattr(h, "_visible_gpu_count", lambda: 0)
+    try:
+        h.gpu_recheck()
+        raised = False
+    except RuntimeError as e:
+        raised = "GPU 设备节点数为 0" in str(e)
+    assert raised
+
+
+def test_visible_gpu_count_opens_real_device_nodes(monkeypatch, tmp_path):
+    # 探测本身：数的是「能 open 的 /dev/nvidia[0-9]*」——节点在但被 cgroup 拒绝
+    # （open 抛 EPERM）不计入；非数字后缀的 nvidiactl/nvidia-uvm 不误计。
+    import ocr_service.health as h
+    def fake_open(path, flags):
+        if path.endswith("nvidia1"):
+            raise PermissionError(1, "Operation not permitted")  # cgroup BPF 拒绝
+        return 123
+    monkeypatch.setattr(h.glob, "glob", lambda pat: ["/dev/nvidia0", "/dev/nvidia1", "/dev/nvidiactl"])
+    monkeypatch.setattr(h.os, "open", fake_open)
+    monkeypatch.setattr(h.os, "close", lambda fd: None)
+    assert h._visible_gpu_count() == 1
+
+
+def test_recheck_refreshes_checked_at_every_success(monkeypatch):
+    # 2026-08-19 回归：成功路径也必须刷 checked_at——它是复检线程活着的心跳，
+    # 只记翻转会让它冻结在启动时刻（本次事故中停在两天前，看起来「正常」）。
+    app = create_app(warmup=False)
+    rd = app.state.readiness
+    rd.run(lambda: {"device": "gpu", "gpu_count": 1})
+    import ocr_service.health as h
+    stamps = iter(["2026-08-19T09:00:01", "2026-08-19T09:01:01", "2026-08-19T09:02:01"])
+    monkeypatch.setattr(h.time, "strftime", lambda fmt: next(stamps))
+    rd.run_recheck(lambda: {"gpu_count": 1})
+    assert rd.get()["checked_at"] == "2026-08-19T09:00:01"
+    assert rd.get()["gpu_count"] == 1
+    rd.run_recheck(lambda: {"gpu_count": 1})
+    assert rd.get()["checked_at"] == "2026-08-19T09:01:01"

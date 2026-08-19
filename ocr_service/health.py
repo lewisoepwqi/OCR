@@ -8,9 +8,14 @@ docker healthcheck 指向 /ready，start_period 给足首次模型加载时间�
 """
 from __future__ import annotations
 
+import glob
 import os
+import re
 import threading
 import time
+
+# 严格匹配 /dev/nvidia<数字>：排除 nvidiactl / nvidia-uvm / nvidia-modeset 等控制节点。
+_GPU_DEVICE_RE = re.compile(r"^/dev/nvidia\d+$")
 
 
 class Readiness:
@@ -57,16 +62,19 @@ class Readiness:
         """运行期轻量复检（如 GPU 可见性探测，不跑推理）：
         - 失败 → ready=False 并记 error（运行期 GPU 丢失要可观测，不能冒充就绪）；
         - 此前**因复检失败**而降级、现在复检通过 → 恢复 ready=True。
-          启动自检（端到端推理）失败不因复检成功翻盘——推理没重验过，不冒充就绪。"""
+          启动自检（端到端推理）失败不因复检成功翻盘——推理没重验过，不冒充就绪；
+        - 无论成败都刷新 checked_at、成功时同步 gpu_count——checked_at 是复检线程
+          还活着的心跳，只记录翻转会让它冻结在启动时刻，复检失明无人察觉
+          （2026-08-19 二次事故：复检恒读 paddle 缓存旧值，checked_at 停在两天前）。"""
         try:
             info = probe_fn() or {}
             with self._lock:
                 if self._recheck_failed:
                     self._recheck_failed = False
-                    self._state.update(ready=True, error=None,
-                                       checked_at=time.strftime("%Y-%m-%dT%H:%M:%S"))
-                    if info.get("gpu_count") is not None:
-                        self._state["gpu_count"] = info["gpu_count"]
+                    self._state.update(ready=True, error=None)
+                if info.get("gpu_count") is not None:
+                    self._state["gpu_count"] = info["gpu_count"]
+                self._state["checked_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
         except Exception as e:  # noqa: BLE001 任何复检失败都归为「未就绪」并记原因
             with self._lock:
                 self._recheck_failed = True
@@ -99,24 +107,20 @@ def default_selftest() -> dict:
     import tempfile
     from pathlib import Path
 
-    from PIL import Image, ImageDraw
-
-    from ocr.build_document import build_ocr
-
     device = os.environ.get("OCR_DEVICE", "gpu")
-    gpu_count = None
-    try:
-        import paddle
-        gpu_count = paddle.device.cuda.device_count()
-    except Exception:                       # noqa: BLE001 取不到 GPU 数不影响自检主体
-        pass
+    gpu_count = _visible_gpu_count()
     # 期望 GPU 却数到 0 卡 → 自检直接失败（/ready 503、容器 unhealthy）。
     # 2026-08-17 事故教训：cgroup 设备过滤器丢失后 paddle 静默降级 CPU，此处若只记录
     # 不拦截，/ready 会一直 200，OCR 在 CPU 上慢跑 13 天无人察觉。
+    # 拦截放在重 import（PIL/paddle 链）之前：权限已丢就不必白费加载。
     if device == "gpu" and (gpu_count or 0) == 0:
         raise RuntimeError(
             f"OCR_DEVICE=gpu 但可见 GPU 数为 {gpu_count}——设备权限可能丢失"
             "（cgroup 设备过滤器/驱动变更），重启容器可恢复；确要纯 CPU 部署请显式设 OCR_DEVICE=cpu")
+
+    from PIL import Image, ImageDraw
+
+    from ocr.build_document import build_ocr
 
     tmp = Path(tempfile.mkdtemp(prefix="cr-ocr-selftest-"))
     try:
@@ -131,18 +135,41 @@ def default_selftest() -> dict:
     return {"device": device, "gpu_count": gpu_count}
 
 
+def _visible_gpu_count() -> int:
+    """数容器内当前真实可打开的 /dev/nvidia[0-9]* 字符设备数。
+
+    为什么不用 paddle.device.cuda.device_count()：paddle C++ 侧的设备数在进程内
+    静态缓存——2026-08-19 事故：容器运行中丢 GPU（cgroup 设备 BPF 被冲掉）后，
+    服务进程里的 paddle 恒报启动时的旧值 1，60s 周期复检形同虚设、OCR 静默
+    CPU 慢跑两天。os.open 每次都发真实系统调用、不过任何进程内缓存：设备
+    节点被 cgroup 设备过滤器拒绝时直接 EPERM，探测即时如实。
+    """
+    n = 0
+    for path in sorted(glob.glob("/dev/nvidia*")):
+        if not _GPU_DEVICE_RE.match(path):
+            continue
+        try:
+            fd = os.open(path, os.O_RDONLY)
+        except OSError:
+            continue
+        os.close(fd)
+        n += 1
+    return n
+
+
 def gpu_recheck() -> dict:
-    """轻量运行期复检：只数 GPU 设备、不跑推理（毫秒级，供 /ready 周期刷新）。
+    """轻量运行期复检：真实探测 GPU 设备节点可打开性（毫秒级，供 /ready 周期刷新）。
 
     期望 gpu 而数到 0 卡 → 抛异常。动机：2026-08-17 宿主机重启后容器 cgroup 设备
     BPF 丢失，GPU 在容器运行中消失而启动自检早已通过、/ready 永远 200——OCR 静默
-    降级 CPU 慢跑多日。此探测让这类运行期故障在 healthcheck 周期内显形。
+    降级 CPU 慢跑多日。2026-08-19 二次复发放大了另一漏洞：paddle 的 device_count
+    进程内静态缓存，复检用它等于永远复读启动结论——故改 _visible_gpu_count()
+    每次发真实 open 系统调用，不经过任何缓存。
     """
     device = os.environ.get("OCR_DEVICE", "gpu")
-    import paddle
-    n = paddle.device.cuda.device_count()
+    n = _visible_gpu_count()
     if device == "gpu" and n == 0:
         raise RuntimeError(
-            "期望 GPU（OCR_DEVICE=gpu）但可见 GPU 数为 0——设备权限可能丢失"
+            "期望 GPU（OCR_DEVICE=gpu）但可打开的 GPU 设备节点数为 0——设备权限可能丢失"
             "（cgroup 设备过滤器/驱动变更），请重启容器恢复")
     return {"gpu_count": n}
