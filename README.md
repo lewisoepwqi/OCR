@@ -13,10 +13,19 @@
 
 接口：
 - `GET  /health` → `{"ok": true}`
-- `POST /ingest` （form：`file`=PDF，可选 `contract_id`）→ 通用解析，返回 `derived/<id>/` 的 tar（`application/x-tar`）；失败返回 HTTP 500 + 结构化 JSON `{"error", "stage", "log"}`（而非裸文本），便于调用方定位失败在哪个阶段
+- `POST /ingest` （form：`file`=页图 tar，可选 `contract_id`，可选 `stages`）→ 通用解析，返回 `derived/<id>/` 的 tar（`application/x-tar`）；失败返回 HTTP 500 + 结构化 JSON `{"error", "stage", "log"}`（而非裸文本），便于调用方定位失败在哪个阶段
 - `GET  /ingest/status/{contract_id}` → `{"contract_id", "steps"}`，只读查询该合同当前 scratch 内 `progress.json`（各阶段 `stage/status/...`）；路由存在但无进度记录时返回 200 + `steps: []`（不是 404）
 - `POST /reocr` （form：`file`=旧 derived tar，`contract_id`）→ 重跑文本，返回新 document
 - `POST /extract-marks`（form：`file`，`kind`=`signature|seal`）→ 通用提取标记（印章框+章文 或 全文字框），**只接受图片**（PNG/JPG），PDF 须在调用方先转成图片；不含任何应用概念，失败返 500 + 结构化 JSON
+
+**`/ingest` 的 `stages` 白名单（可选）**：声明本次只跑哪几个阶段，逗号分隔，如 `stages=probe_layout,build_document`。
+- 合法取值即服务内四个阶段名：`probe_layout`（版面检测）→ `build_document`（OCR 文字识别、组 `document.json`）→ `recognize_tables`（表格识别）→ `recognize_seals`（印章文字）；执行顺序恒为流水线顺序，与书写顺序无关，容忍逗号间空白/重复项。
+- **不传 / 空白 = 跑满四阶段**，行为与历史完全一致（含产物与 progress 语义）。
+- 依赖是硬约束：`build_document` 需 `probe_layout`；`recognize_tables`/`recognize_seals` 需 `build_document`。缺前置 → **HTTP 400**，报错指明缺谁。不自动补跑前置——stages 是调用方的成本契约，服务不替他花没声明的算力/显存。
+- 未知阶段名（含拼写错误）→ **HTTP 400**，报错列出全部合法名；绝不静默少跑。
+- 被请求跳过的阶段在 `progress.json`/`/ingest/status` 记 `status="skipped-by-request"`，区别于续跑语义的 `"skipped"`（上次已跑完、产物在）。"
+- 跳过阶段的产物（如 `tables.json`/`seals.json`）不在返回 tar 里，属正常；下游只读自己要的文件即可（解包不因缺文件报错）。
+- 续跑不受影响：失败保留 scratch，同 `contract_id` 重试跳过已完成阶段；上次带 `stages` 跑过、这次不带重试，会把缺的阶段补上（产物不存在 ≠ 已完成）。
 
 **tar 包结构（`/ingest` 与 `/reocr` 的上传包硬约束）**：上传的 tar，**顶层目录名必须与 `contract_id` 一致**（经 `sanitize_id` 归一后的值），否则防穿越校验会以
 `非法成员路径（疑似穿越/前缀不符）` 拒绝。标准结构：
