@@ -18,7 +18,7 @@ from fastapi.responses import JSONResponse, Response
 from common import bundle
 from . import health as health_mod
 from . import ingest as ingest_mod
-from .parser import read_progress
+from .parser import StageSpecError, parse_stages, read_progress
 
 
 def scratch_root() -> Path:
@@ -85,7 +85,14 @@ def create_app(*, ingest_fn=None, reocr_fn=None, selftest_fn=None, warmup=True) 
         return JSONResponse(st, status_code=200 if st["ready"] else 503)
 
     @app.post("/ingest")
-    def ingest_ep(file: UploadFile = File(...), contract_id: str | None = Form(None)) -> Response:
+    def ingest_ep(file: UploadFile = File(...), contract_id: str | None = Form(None),
+                  stages: str = Form(None)) -> Response:
+        """页图 tar → 私有 scratch 跑通用解析 → 返 derived tar（排除 pages）。
+
+        stages（可选）：逗号分隔的阶段白名单，如 "probe_layout,build_document"。
+        不传/空白 = 跑满四阶段（默认行为不变）。未知名或缺前置 → 400（不静默少跑/不自动补前置）。
+        白名单外的阶段不执行，其产物（tables.json/seals.json）缺位属正常。
+        """
         try:
             ttl_hours = float(os.environ.get("OCR_SCRATCH_TTL_HOURS", "48"))
         except ValueError:
@@ -97,6 +104,11 @@ def create_app(*, ingest_fn=None, reocr_fn=None, selftest_fn=None, warmup=True) 
         cid = ingest_mod.sanitize_id(contract_id) if contract_id else ingest_mod.sanitize_id(file.filename)
         if not cid:
             raise HTTPException(status_code=400, detail="无法确定合法 contract_id（请提供 contract_id 或用 ASCII 文件名）")
+        try:
+            stage_list = parse_stages(stages)
+        except StageSpecError as e:
+            # 调用方声明错误：未知名/缺前置，明确报 400，不静默
+            raise HTTPException(status_code=400, detail=str(e))
         # 按 cid 派生固定 scratch（续跑复用）；成功打包后才清，失败保留在磁盘
         scratch = scratch_root() / cid
         derived = scratch / "derived"
@@ -106,7 +118,11 @@ def create_app(*, ingest_fn=None, reocr_fn=None, selftest_fn=None, warmup=True) 
             bundle.unpack_dir(file.file.read(), derived, cid)
         except bundle.BundleError as e:
             raise HTTPException(status_code=400, detail=f"非法页图包：{e}（tar 顶层目录名须与 contract_id 一致，结构见 README）")
-        res = _ingest(cid, contracts_root=scratch)
+        # stages 仅在显式声明时透传（默认路径的调用形状与历史一致，注入的 ingest_fn 无需感知新参数）
+        if stage_list is None:
+            res = _ingest(cid, contracts_root=scratch)
+        else:
+            res = _ingest(cid, contracts_root=scratch, stages=stage_list)
         if "error" in res:
             # 结构化失败：透传 stage/log（此前被丢弃）；保留 scratch 供续跑
             return JSONResponse(status_code=500, content={
