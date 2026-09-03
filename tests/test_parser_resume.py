@@ -1,6 +1,7 @@
 """parser 续跑：已完成步（规范产物存在且可解析）跳过；progress.json 反映执行轨迹。"""
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 from ocr_service.parser import parse, EXPECTED_ARTIFACT, read_progress
 
@@ -14,15 +15,13 @@ def _make_runner(calls, fail_stage=None):
         root = Path(env["CR_CONTRACTS_ROOT"])
         cid = cmd[cmd.index("--id") + 1]
         if stage == fail_stage:
-            class R: returncode = 1; stderr = f"{stage} boom"; stdout = ""
-            return R()
+            return SimpleNamespace(returncode=1, stderr=f"{stage} boom", stdout="")
         derived = root / "derived" / cid
         derived.mkdir(parents=True, exist_ok=True)
         art = derived / EXPECTED_ARTIFACT[stage]
         art.parent.mkdir(parents=True, exist_ok=True)
         art.write_text("{}", encoding="utf-8")   # 可 JSON 解析的规范产物
-        class R: returncode = 0; stderr = ""; stdout = "ok"
-        return R()
+        return SimpleNamespace(returncode=0, stderr="", stdout="ok")
     return runner
 
 
